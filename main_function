@@ -27,7 +27,6 @@ Status = ""
 
 #Authentication
 ...
-
 #Google Sheet Setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY'
@@ -43,284 +42,295 @@ openai.api_key = OPENAI_API_KEY
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 def lambda_handler(event, context):
+    
+    ############################################################################################################       
+    #### PRE INITIALIZATION ####
+    ############################################################################################################         
+    
+    #Initialize Old variables
+    partition_key_name = 'ticket_number'
+    ticket_number = None
+    table_name = 'SC_Automan_Reruns'
+    status= "Lambda Re-Run Stopped by Dynamo DB Check" # default comment when open sc ==1 or this becomes opening comment for multiopen  sc when open sc>1
+    credentials = base64.b64encode(f"ai-zd-integration@trilogy.com/token:{ZENDESK_API_KEY}".encode("utf-8")).decode("utf-8")
+    date_time = "0000-00-00T00:00:00.000Z"
+    
+    #Initialize New variables
+    ticket_number = None
+    auth_string = None
+    followup_ticket = False
+    followup_ticket_number = None
+    ticketDescription = ""
+    response = ""
+    extracted_data = {}
+    date_str = ""
+    cursor = ""
+    user_id = ""
+    filename = "clean_and_conform_extracted_date.txt"
+    global_gpt_reply = ""
+    gpt_date = ""
+    ticket_description_text = ""
+    extracted_expiry_date = ""
+    extracted_company_name = ""
+    extracted_email = ""
 
-    try:    
-        ############################################################################################################       
-        #### PRE INITIALIZATION ####
-        ############################################################################################################    
+    
+    # Define possible date formats
+    date_formats = [
+        "%b %d, %Y",  # Jan 01, 2023
+            "%d/%m/%Y",   # 01/01/2023
+            "%Y-%m-%d",   # 2023-01-01
+            "%m/%d/%Y",   # 01/01/2023
+            "%d-%m-%Y",   # 01-01-2023
+            "%d %b %Y",   # 01 Jan 2023
+            "%d %B %Y",   # 01 January 2023
+            "%B %d, %Y",  # January 01, 2023
+            "%Y.%m.%d",   # 2023.01.01
+            "%Y/%m/%d",   # 2023/01/01
+            "%Y %b %d",   # 2023 Jan 01
+            "%Y %B %d",   # 2023 January 01
+            "%d/%m/%y",   # 01/01/23 (two-digit year)
+            "%m/%d/%y",   # 01/01/23
+        ]
+    
+    #Determine Current Time
+    current_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' # Get the current time in UTC
+    current_time_str = ''.join(current_time) # Convert the current time to a string
+    current_time_new = datetime.fromisoformat(current_time_str.strip('Z')).replace(microsecond=0)
+    print('Current Time:', current_time_new)
+    
+    dynamodb = boto3.client(
+        'dynamodb',
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        region_name=region_name
+    )
+    
+    ############################################################################################################       
+    #### INITIAL FUNCTIONS ####
+    ############################################################################################################     
+    
+    #Function to get the worksheet
+    def get_worksheet(gscredentials):
+        try:
+            gc = gspread.authorize(gscredentials)
+            sh = gc.open_by_key('1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY')
+            worksheet = sh.worksheet('Sheet1')
+            return worksheet
+        except APIError as e:
+            if 'APIError' in str(e):
+                print("Google API error, ignoring...")
+            else:
+                raise  # Re-raise the exception if it's not a quota exceeded error
+    
+    #Function to write to GSHEET
+    def write_to_gsheet(gscredentials, current_time, ticket_number, status):
+        try:
+            worksheet = get_worksheet(gscredentials)
+            row_data = [current_time, ticket_number, status]
+            worksheet.append_row(row_data)
+        except APIError as e:
+            if 'APIError' in str(e):
+                print("Google API error, ignoring writing to google sheet and moving on...")
+            else:
+                raise  # Re-raise the exception if it's not a quota exceeded error
+    
+    
+    #Function to Make the ticket Open
+    def put_ticket_on_open(credentials, ticket_number, comment):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}"
+        }
+
+        jsonBody = {
+            "ticket": {
+                "status": "open",    
+                "comment": {
+                    "body": (
+                        f"CF Automan: {comment}"
+                    ),
+                    "public": False
+                }
+            }
+        }
         
+        update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
+        update_response = requests.put(update_url, headers=headers, json=jsonBody)
+        
+        if update_response.status_code == 200:
+            pass
+            #print("PUT API for opening the ticket succeeded")
+        else:
+            print(f"PUT API for opening the ticket failed: {update_response.status_code}")
+            print(f"Response content: {update_response.content}")
+
+    #Function to Make the Solved with a Public Comment
+    def put_ticket_on_solved_pr(credentials, ticket_number, comment):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}"
+        }
+
+        jsonBody = {
+            "ticket": {
+                "status": "closed",
+                "comment": {
+                    "body": (
+                        f"CF Automan: {comment}"
+                    ),
+                    "public": True
+                    }
+            }
+        }
+        
+        update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
+        update_response = requests.put(update_url, headers=headers, json=jsonBody)
+        
+        if update_response.status_code == 200:
+            pass
+            print("PUT API for opening the ticket succeeded")
+        else:
+            print(f"PUT API for opening the ticket failed: {update_response.status_code}")
+            print(f"Response content: {update_response.content}")
+            
+    def put_ticket_on_solved_pr_customer(credentials, ticket_number, comment):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}"
+        }
+
+        jsonBody = {
+            "ticket": {
+                "email_cc_ids": [16482845670802], #16482845670802 Bill Gleeson Cloudfix Email ID
+                "collaborator_ids": [16482845670802], #16482845670802 Bill Gleeson Cloudfix Email ID
+                "status": "closed",
+                "comment": {
+                    "body": (
+                        f"{comment}"
+                    ),
+                    "public": True
+                    }
+            }
+        }
+        
+        update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
+        update_response = requests.put(update_url, headers=headers, json=jsonBody)
+        
+        if update_response.status_code == 200:
+            pass
+            print("PUT API for opening the ticket succeeded")
+        else:
+            print(f"PUT API for opening the ticket failed: {update_response.status_code}")
+            print(f"Response content: {update_response.content}")
+    
+    #update Ticket Requester
+    def update_requester(credentials, ticket_number, extracted_email):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}"
+        }
+
+        # # Step 1: Search for the user by email
+        # contact_email = extracted_email
+        
+        search_url = f"https://central-supportdesk.zendesk.com/api/v2/users/search.json?query=type:user email:\"{extracted_email}\""
+        search_response = requests.get(search_url, headers=headers)
+
+        if search_response.status_code == 200 and search_response.json()['count'] > 0:
+            user_id = search_response.json()['users'][0]['id']
+            print("User found:", user_id)
+        else:
+            # Step 2: Create the user if they don't exist
+            create_user_url = "https://central-supportdesk.zendesk.com/api/v2/users.json"
+            user_data = {
+                "user": {
+                    "name": extracted_email,  # Use full name if available, otherwise use email
+                    "email": extracted_email
+                }
+            }
+            create_response = requests.post(create_user_url, headers=headers, json=user_data)
+            if create_response.status_code == 201:
+                user_id = create_response.json()['user']['id']
+            else:
+                print("Error creating user:", create_response.text)
+                return False
+
+        # Step 3: Update the ticket with the requester_id
+        jsonBody = {
+            "ticket": {
+                "requester_id": user_id,
+                }
+            }
+
+        update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/{ticket_number}.json"
+        update_response = requests.put(update_url, headers=headers, json=jsonBody)
+
+        if update_response.status_code == 200:
+            print("Ticket updated successfully.")
+            return True
+        else:
+            print("Error updating ticket:", update_response.text)
+            return False
+        
+    def get_last_entries(ticket_number):
+        response = dynamodb.query(
+            TableName=table_name,
+            KeyConditionExpression= f"{partition_key_name} = :pkval",
+            ExpressionAttributeValues={
+                ':pkval': {'S': partition_key_value}
+            },
+            Limit=10,
+            ScanIndexForward=False,  # To get the latest entries first
+            ProjectionExpression='ticket_number, date_time'  # Adjust if your attribute names are different
+        )
+        return response.get('Items', [])
+    
+    def is_ticket_recent(ticket_number, entries, time_limit_seconds=100):
+        now = datetime.now(timezone.utc)
+        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        for entry in entries:
+            if entry['ticket_number']['S'] == ticket_number:
+                entry_time = datetime.strptime(entry['date_time']['S'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
+                if (now - entry_time).total_seconds() <= time_limit_seconds:
+                    return True
+        return False
+    
+    def append_entry(ticket_number):
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        #print(f"Adding item to DynamoDB: ticket_number={ticket_number}, date_time={now}")
+        dynamodb.put_item(
+            TableName=table_name,
+            Item={
+                partition_key_name: {'S': partition_key_value},
+                'date_time': {'S': now}
+            }
+        )
+
+    ############################################################################################################       
+    #### Parse Incoming JSON and Authenticate ####
+    ############################################################################################################     
+    
+    try:    
         # Parse the incoming JSON payload
-        if 'body' in event:
+        if 'body' in event and event['body']:
             body = json.loads(event['body'])
             ticket_number = body.get('ticket_number')
             auth_string = body.get('auth_string')
+            if not ticket_number or not auth_string:
+                raise ValueError("No ticket number or auth provided in the request body")
             print('Ticket Number:', ticket_number)
         else:
-            raise ValueError("Invalid ticket number or auth provided in the request body")
-            Status = "Invalid ticket number or auth provided in the request body"
+            raise ValueError("Invalid ticket number or auth provided Issue")
         
-        #Authenticate the request
+        # Authenticate the request
         if auth_string == "gskoajdfgk783465FHJgrndY7^^(b_455":
             pass
         else:
             print("Invalid auth provided in the request body")
             raise ValueError("Invalid auth")
-            Status = "Invalid auth provided in the request body"
-        
-        
-        #Initialize Old variables
-        partition_key_name = 'ticket_number'
-        partition_key_value = ticket_number    
-        table_name = 'SC_Automan_Reruns'
-        status= "Lambda Re-Run Stopped by Dynamo DB Check" # default comment when open sc ==1 or this becomes opening comment for multiopen  sc when open sc>1
-        credentials = base64.b64encode(f"ai-zd-integration@trilogy.com/token:{ZENDESK_API_KEY}".encode("utf-8")).decode("utf-8")
-        date_time = "0000-00-00T00:00:00.000Z"
-        
-        #Initialize New variables
-        followup_ticket = False
-        followup_ticket_number = None
-        ticketDescription = ""
-        response = ""
-        extracted_data = {}
-        date_str = ""
-        cursor = ""
-        user_id = ""
-        filename = "find_org_date_prompt.txt"
-        global_gpt_reply = ""
-        gpt_date = ""
-        ticket_description_text = ""
-        extracted_date = ""
-        
-        # Define possible date formats
-        date_formats = [
-            "%b %d, %Y",  # Jan 01, 2023
-                "%d/%m/%Y",   # 01/01/2023
-                "%Y-%m-%d",   # 2023-01-01
-                "%m/%d/%Y",   # 01/01/2023
-                "%d-%m-%Y",   # 01-01-2023
-                "%d %b %Y",   # 01 Jan 2023
-                "%d %B %Y",   # 01 January 2023
-                "%B %d, %Y",  # January 01, 2023
-                "%Y.%m.%d",   # 2023.01.01
-                "%Y/%m/%d",   # 2023/01/01
-                "%Y %b %d",   # 2023 Jan 01
-                "%Y %B %d",   # 2023 January 01
-                "%d/%m/%y",   # 01/01/23 (two-digit year)
-                "%m/%d/%y",   # 01/01/23
-            ]
-        
-        #Determine Current Time
-        current_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' # Get the current time in UTC
-        current_time_str = ''.join(current_time) # Convert the current time to a string
-        current_time_new = datetime.fromisoformat(current_time_str.strip('Z')).replace(microsecond=0)
-        print('Current Time:', current_time_new)
-        
-        dynamodb = boto3.client(
-            'dynamodb',
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            region_name=region_name
-        )
-        
-        ############################################################################################################       
-        #### INITIAL FUNCTIONS ####
-        ############################################################################################################     
-        
-        #Function to get the worksheet
-        def get_worksheet(gscredentials):
-            try:
-                gc = gspread.authorize(gscredentials)
-                sh = gc.open_by_key('1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY')
-                worksheet = sh.worksheet('Sheet1')
-                return worksheet
-            except APIError as e:
-                if 'APIError' in str(e):
-                    print("Google API error, ignoring...")
-                else:
-                    raise  # Re-raise the exception if it's not a quota exceeded error
-        
-        #Function to write to GSHEET
-        def write_to_gsheet(gscredentials, current_time, ticket_number, status):
-            try:
-                worksheet = get_worksheet(gscredentials)
-                row_data = [current_time, ticket_number, status]
-                worksheet.append_row(row_data)
-            except APIError as e:
-                if 'APIError' in str(e):
-                    print("Google API error, ignoring writing to google sheet and moving on...")
-                else:
-                    raise  # Re-raise the exception if it's not a quota exceeded error
-        
-        
-        #Function to Make the ticket Open
-        def put_ticket_on_open(credentials, ticket_number, comment):
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {credentials}"
-            }
 
-            jsonBody = {
-                "ticket": {
-                    "status": "open",    
-                    "comment": {
-                        "body": (
-                            f"CF Automan: {comment}"
-                        ),
-                        "public": False
-                    }
-                }
-            }
-            
-            update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
-            update_response = requests.put(update_url, headers=headers, json=jsonBody)
-            
-            if update_response.status_code == 200:
-                pass
-                #print("PUT API for opening the ticket succeeded")
-            else:
-                print(f"PUT API for opening the ticket failed: {update_response.status_code}")
-                print(f"Response content: {update_response.content}")
-    
-        #Function to Make the Solved with a Public Comment
-        def put_ticket_on_solved_pr(credentials, ticket_number, comment):
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {credentials}"
-            }
-
-            jsonBody = {
-                "ticket": {
-                    "status": "closed",
-                    "comment": {
-                        "body": (
-                            f"CF Automan: {comment}"
-                        ),
-                        "public": True
-                        }
-                }
-            }
-            
-            update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
-            update_response = requests.put(update_url, headers=headers, json=jsonBody)
-            
-            if update_response.status_code == 200:
-                pass
-                print("PUT API for opening the ticket succeeded")
-            else:
-                print(f"PUT API for opening the ticket failed: {update_response.status_code}")
-                print(f"Response content: {update_response.content}")
-                
-        def put_ticket_on_solved_pr_customer(credentials, ticket_number, comment):
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {credentials}"
-            }
-
-            jsonBody = {
-                "ticket": {
-                    "email_cc_ids": [16482845670802], #16482845670802 Bill Gleeson Cloudfix Email ID
-                    "collaborator_ids": [16482845670802], #16482845670802 Bill Gleeson Cloudfix Email ID
-                    "status": "closed",
-                    "comment": {
-                        "body": (
-                            f"{comment}"
-                        ),
-                        "public": True
-                        }
-                }
-            }
-            
-            update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/update_many.json?ids={ticket_number}"
-            update_response = requests.put(update_url, headers=headers, json=jsonBody)
-            
-            if update_response.status_code == 200:
-                pass
-                print("PUT API for opening the ticket succeeded")
-            else:
-                print(f"PUT API for opening the ticket failed: {update_response.status_code}")
-                print(f"Response content: {update_response.content}")
-        
-        #update Ticket Requester
-        def update_requester(credentials, ticket_number, extracted_data):
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {credentials}"
-            }
-
-            # Step 1: Search for the user by email
-            contact_email = extracted_data.get("email")
-            
-            search_url = f"https://central-supportdesk.zendesk.com/api/v2/users/search.json?query=type:user email:\"{contact_email}\""
-            search_response = requests.get(search_url, headers=headers)
-
-            if search_response.status_code == 200 and search_response.json()['count'] > 0:
-                user_id = search_response.json()['users'][0]['id']
-                print("User found:", user_id)
-            else:
-                # Step 2: Create the user if they don't exist
-                create_user_url = "https://central-supportdesk.zendesk.com/api/v2/users.json"
-                user_data = {
-                    "user": {
-                        "name": contact_email,  # Use full name if available, otherwise use email
-                        "email": contact_email
-                    }
-                }
-                create_response = requests.post(create_user_url, headers=headers, json=user_data)
-                if create_response.status_code == 201:
-                    user_id = create_response.json()['user']['id']
-                else:
-                    print("Error creating user:", create_response.text)
-                    return False
-
-            # Step 3: Update the ticket with the requester_id
-            jsonBody = {
-                "ticket": {
-                    "requester_id": user_id,
-                    }
-                }
-
-            update_url = f"https://central-supportdesk.zendesk.com/api/v2/tickets/{ticket_number}.json"
-            update_response = requests.put(update_url, headers=headers, json=jsonBody)
-
-            if update_response.status_code == 200:
-                print("Ticket updated successfully.")
-                return True
-            else:
-                print("Error updating ticket:", update_response.text)
-                return False
-                
-        def get_last_entries(ticket_number, limit=10):
-            response = dynamodb.query(
-                TableName=table_name,
-                KeyConditionExpression= f"{partition_key_name} = :pkval",
-                ExpressionAttributeValues={
-                    ':pkval': {'S': partition_key_value}
-                },
-                Limit=limit,
-                ScanIndexForward=False,  # To get the latest entries first
-                ProjectionExpression='ticket_number, date_time'  # Adjust if your attribute names are different
-            )
-            return response.get('Items', [])
-
-        def is_ticket_recent(ticket_number, entries, time_limit_seconds=100):
-            now = datetime.utcnow().replace(tzinfo=pytz.UTC)
-            for entry in entries:
-                if entry['ticket_number']['S'] == ticket_number:
-                    entry_time = datetime.strptime(entry['date_time']['S'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
-                    if (now - entry_time).total_seconds() <= time_limit_seconds:
-                        return True
-            return False
-
-        def append_entry(ticket_number):
-            now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-            #print(f"Adding item to DynamoDB: ticket_number={ticket_number}, date_time={now}")
-            dynamodb.put_item(
-                TableName=table_name,
-                Item={
-                    partition_key_name: {'S': partition_key_value},
-                    'date_time': {'S': now}
-                }
-            )
 
         ############################################################################################################       
         #### DOUBLE RUN CHECK USING DBB WITH PRE INITIALIZATION ####
@@ -328,6 +338,10 @@ def lambda_handler(event, context):
         
         # Check if the ticket_number exists in the table
         try:
+            partition_key_value = ticket_number
+            if not partition_key_value:
+                raise ValueError("ticket_number is missing or None")
+    
             response = dynamodb.get_item(
                 TableName=table_name,
                 Key={
@@ -346,7 +360,7 @@ def lambda_handler(event, context):
             print(f"Error retrieving item: {e}")
 
         # Proceed with the double run check
-        last_entries = get_last_entries('your-partition-key-value')
+        last_entries = get_last_entries(ticket_number)
         if is_ticket_recent(ticket_number, last_entries):
             raise Exception(f"Multiple runs detected for ticket number {ticket_number} and stopped using DBB.")
         else:
@@ -371,10 +385,10 @@ def lambda_handler(event, context):
                     raise  # Re-raise the exception if it's not a quota exceeded error
         
         #Function to write to Scheduler GSHEET
-        def write_to_scheduler_gsheet(gscredentials, ticket_number, followup_update):
+        def write_to_scheduler_gsheet(gscredentials, ticket_number, followup_date):
             try:
                 worksheet = get_scheduler_worksheet(gscredentials)
-                row_data = [followup_update, ticket_number, 'CloudFix Deprovisioning Automan', 'Scheduled']
+                row_data = [followup_date, ticket_number, 'CloudFix Deprovisioning Automan', 'Scheduled']
                 worksheet.append_row(row_data)
             except APIError as e:
                 if 'APIError' in str(e):
@@ -382,22 +396,23 @@ def lambda_handler(event, context):
                 else:
                     raise  # Re-raise the exception if it's not a quota exceeded error
             
-        def is_future_date(extracted_date):
+        def is_future_date(extracted_expiry_date):
             for date_format in date_formats:
+                extracted_expiry_date = str(extracted_expiry_date)
                 try:
-                    date_obj = datetime.strptime(extracted_date, date_format)
+                    date_obj = datetime.strptime(extracted_expiry_date, date_format)
                     return date_obj > datetime.now()
                 except ValueError:
                     continue  # Try the next format
             
             # If none of the formats match, raise an error
-            raise ValueError(f"Date format for '{extracted_date}' is not recognized.")
+            raise ValueError(f"Date format for '{extracted_expiry_date}' is not recognized.")
 
-        def deprovision_instance(cursor, company_name):
-            cursor.execute(f'SELECT id, company_name FROM tenants WHERE company_name LIKE "%{company_name}%"')
+        def deprovision_instance(cursor, extracted_company_name):
+            cursor.execute(f'SELECT id, company_name FROM tenants WHERE company_name LIKE "%{extracted_company_name}%"')
             result = cursor.fetchall()
-            print(result)
-            if result:
+            print('Search results in DB for the company name', result)
+            if result and len(result) == 1:
                 tenant_id = result[0][0]
                 cursor.execute(f"UPDATE tenants SET entitlement_tier = NULL, pricing_plan_id = 4 WHERE id = {tenant_id}")
                 result = cursor.fetchall()
@@ -405,11 +420,13 @@ def lambda_handler(event, context):
 
                 cursor.execute(f'SELECT id, company_name, entitlement_tier, pricing_plan_id FROM tenants WHERE id = {tenant_id}')
                 result = cursor.fetchall()
-                print("validating", result)
+                print('Search results in DB after update', result)
+                #result= [f"ID: {item[0]}, Name: {item[1]}" for item in result]
+                #print("validating", "\n".join(result))
                 if result[0][3]==4:
                     comment = (
-                        f"Dear {extracted_data['full_name']},\n\n"
-                        f"Your subscription for {extracted_data['company_name']} to CloudFix has been canceled. We understand that circumstances can change, and we're here to help you through this transition.\n\n"
+                        f"Dear Customer,\n\n"
+                        f"Your subscription for {extracted_company_name} to CloudFix has been canceled. We understand that circumstances can change, and we're here to help you through this transition.\n\n"
                         "IMPORTANT: To Prevent Unwanted Charges\n"
                         "Please ensure you've also canceled your subscription through the AWS Marketplace. You can easily do this by following the steps in AWS's \"Cancel the software subscription\" section.\n\n"
                         "Your Data Stays with You\n"
@@ -422,7 +439,7 @@ def lambda_handler(event, context):
                         "Best regards,\n"
                         "CloudFix Support Team"
                     )
-                    update_requester(credentials, ticket_number, extracted_data)
+                    update_requester(credentials, ticket_number, extracted_email)
                     put_ticket_on_solved_pr_customer(credentials, ticket_number, comment)
                     status= "CF Automan found the necessary information to proceed with the CloudFix Cancellation."
                     write_to_gsheet(gscredentials, current_time, ticket_number, status)
@@ -434,9 +451,23 @@ def lambda_handler(event, context):
                     write_to_gsheet(gscredentials, current_time, ticket_number, status)
                     return False
             
+            elif result and len(result) > 1:
+                print(f"Multiple company names for '{extracted_company_name}' found in the database.")
+                comment = (
+                    f"I found the following companies when searching for '{extracted_company_name}' in our Database!\n\n"
+                    f"{result}\n\n"
+                    "So, I am leaving the ticket open for manually completing this task by an agent. "
+                    "Please share feedback in the log linked here so I can understand what happened and learn from it: "
+                    "[CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
+                    )
+                put_ticket_on_open(credentials, ticket_number, comment)
+                status= "CF Automan found multiple company names in the database. Leaving the ticket open for manual completion."
+                write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                return False
+                
             else:
-                print(f"Company name '{company_name}' not found in the database.")
-                comment = "Hmm, I couldn't find this company in our Database! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
+                print(f"Company name '{extracted_company_name}' not found in the database.")
+                comment = f"Hmm, I read '{extracted_company_name}' as the company name and couldn't find this company in our Database! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
                 put_ticket_on_open(credentials, ticket_number, comment)
                 status= "CF Automan could not find the company name in the database. Leaving the ticket open for manual completion."
                 write_to_gsheet(gscredentials, current_time, ticket_number, status)
@@ -460,31 +491,40 @@ def lambda_handler(event, context):
                 gpt_reply = gptresponse.choices[0].message.content
                 return gpt_reply
         
-        #define function to find description from the ticket
-        def find_description(ticket_number):
-            print("Finding description")
-            ticket_description_text = ticket_gen_data['ticket'].get('description', None) 
+        # def find_description(ticket_number):
+        #     print("Finding description")
+        #     ticket_description_text = ticket_gen_data['ticket'].get('description', None) 
             
-            # Regex patterns
-            date_pattern = r"(\b\d{1,2}(?:st|nd|rd|th)?\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,\s\d{4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s\d{1,2}(?:st|nd|rd|th)?,\s\d{4}\b)"
-            product_pattern = r"Product:\s(.+)"
-            company_name_pattern = r"Company Name:\s(.+)"
-            full_name_pattern = r"Contact Full Name:\s(.+)"
-            email_pattern = r"Contact Email:\s([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
-            cc_pattern = r"CC:\s([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+        #     # Regex patterns
+        #     date_pattern = r"(\b\d{1,2}(?:st|nd|rd|th)?\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,\s\d{4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s\d{1,2}(?:st|nd|rd|th)?,\s\d{4}\b)"
+        #     product_pattern = r"Product:\s(.+)"
+        #     company_name_pattern = r"Company Name:\s(.+)"
+        #     full_name_pattern = r"Contact Full Name:\s(.+)"
+        #     email_pattern = r"Contact Email:\s([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+        #     cc_pattern = r"CC:\s([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 
-            extracted_data = {
-                "date": re.search(date_pattern, ticket_description_text).group(1) if re.search(date_pattern, ticket_description_text) else '11/11/1111',
-                "product": re.search(product_pattern, ticket_description_text).group(1) if re.search(product_pattern, ticket_description_text) else None,
-                "company_name": re.search(company_name_pattern, ticket_description_text).group(1) if re.search(company_name_pattern, ticket_description_text) else None,
-                "full_name": re.search(full_name_pattern, ticket_description_text).group(1) if re.search(full_name_pattern, ticket_description_text) else None,
-                "email": re.search(email_pattern, ticket_description_text).group(1) if re.search(email_pattern, ticket_description_text) else None,
-                "cc": re.search(cc_pattern, ticket_description_text).group(1) if re.search(cc_pattern, ticket_description_text) else None,
-            }
+        #     extracted_data = {
+        #         "date": re.search(date_pattern, ticket_description_text).group(1) if re.search(date_pattern, ticket_description_text) else '11/11/1111',
+        #         "product": re.search(product_pattern, ticket_description_text).group(1) if re.search(product_pattern, ticket_description_text) else None,
+        #         "company_name": re.search(company_name_pattern, ticket_description_text).group(1) if re.search(company_name_pattern, ticket_description_text) else None,
+        #         "full_name": re.search(full_name_pattern, ticket_description_text).group(1) if re.search(full_name_pattern, ticket_description_text) else None,
+        #         "email": re.search(email_pattern, ticket_description_text).group(1) if re.search(email_pattern, ticket_description_text) else None,
+        #         "cc": re.search(cc_pattern, ticket_description_text).group(1) if re.search(cc_pattern, ticket_description_text) else None,
+        #     }
             
-            return extracted_data
+            # return extracted_data
 
-         
+                # Convert the string into a dictionary using regular expressions
+        
+        def parse_extracted_data(data):
+            parsed_data = {}
+            lines = data.split("\n")
+            for line in lines:
+                match = re.match(r"- (\w+) = \"(.*)\"", line.strip())
+                if match:
+                    key, value = match.groups()
+                    parsed_data[key] = value
+            return parsed_data
 
         ############################################################################################################        
         #### MAIN INITIALIZATION ####
@@ -516,108 +556,199 @@ def lambda_handler(event, context):
         
         # Get Ticket Description 
         #ticketDescription = ticket_gen_data['ticket'].get('description', None)
-        extracted_data = find_description(ticket_number)
-        print("extracted data", extracted_data)
-        extracted_date = extracted_data["date"]
+        # extracted_data = find_description(ticket_number)
+        # print("extracted data", extracted_data)
+        # extracted_expiry_date = extracted_data["date"]
+        # extracted_company_name = extracted_data["company_name"]
+        # extracted_email = extracted_data["email"]
         
-        
-        
+        #ticketDescription using GPT
+        extracted_data = call_gpt(filename)
+
+        # Parse the data
+        if extracted_data.strip():  # Ensure the string is not empty
+            try:
+                extracted_data_dict = parse_extracted_data(extracted_data)
+            except Exception as e:
+                print(f"Error parsing data: {e}")
+                extracted_data_dict = {}
+        else:
+            print("Error: extracted_data is empty!")
+            extracted_data_dict = {}
+
+        # Extract fields
+        extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
+        extracted_company_name = extracted_data_dict.get("extracted_company_name", "UNSURE ABOUT COMPANY NAME")
+        extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
+
+        # Print extracted values for debugging
+        print(f"Expiry Date: {extracted_expiry_date}")
+        print(f"Company Name: {extracted_company_name}")
+        print(f"Email: {extracted_email}")
         
         ############################################################################################################        
         #### MAIN LOGIC ####
         ############################################################################################################    
-                        
+        
+        #                
         
         #if extracted_data["date"] is '11/11/1111' Call GPT to get the date
-        if extracted_date == '11/11/1111':
-            global_gpt_reply = call_gpt(filename)
-            print('GPT:', global_gpt_reply)
+        # if extracted_expiry_date == '11/11/1111':
+        #     global_gpt_reply = call_gpt(filename)
+        #     print('GPT:', global_gpt_reply)
             
-            if "NOT FOUND" in global_gpt_reply:
-                extracted_date = '11/11/1111'
-            else:
-                extracted_date = global_gpt_reply
-        else:
-            pass
+        #     if "NOT FOUND" in global_gpt_reply:
+        #         extracted_expiry_date = '11/11/1111'
+        #     else:
+        #         extracted_expiry_date = global_gpt_reply
+        # else:
+        #     pass
         
+        if extracted_expiry_date == "MULTIPLE DATES FOUND":
+            comment = (
+                "I found multiple dates in the ticket description. It is important to have a single date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                "Company Name:\n"
+                "Contact Full Name:\n"
+                "Contact Email:\n\n"
+                "Thank you!"
+            )
+            put_ticket_on_solved_pr(credentials, ticket_number, comment)
+            status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
+            write_to_gsheet(gscredentials, current_time, ticket_number, status)
+            #end the script
+            return
+            
         #check extracted data for {'company_name' and 'email'} if any is missing then open the ticket with comment that data is missing
-        if extracted_data["company_name"] is None or extracted_data["email"] is None:
-            if followup_ticket == False:
-                comment = (
-                    "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems that either the expiry date, company name or email is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
-                    "Expiry Date:\n"
-                    "Company Name:\n"
-                    "Contact Full Name:\n"
-                    "Contact Email:\n\n"
-                    "Thank you!"
-                )
-                put_ticket_on_solved_pr(credentials, ticket_number, comment)
-                status= "CF Automan did not find either the date, company name or email which are vital to complete this request."
-                write_to_gsheet(gscredentials, current_time, ticket_number, status)
-                return
-            
-            else: #if followup_ticket == True:      
-                # Check the description of the followup ticket
-                response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
-                if response.status_code == 200:
-                    ticket_gen_data = response.json()
-                    ticket_description_text = ticket_gen_data['ticket'].get('description', None)
-                else:
-                    print(f"Failed to fetch sc data: {response.status_code}")   
-                
-                extracted_data = find_description(followup_ticket_number)
-                print("extracted followup data", extracted_data)
-                extracted_date = extracted_data["date"]
-                
-                #if extracted_data["date"] is '11/11/1111' Call GPT to get the date
-                if extracted_date == '11/11/1111':
-                    global_gpt_reply = call_gpt(filename)
-                    print('GPT:', global_gpt_reply)
-                    
-                    if "NOT FOUND" in global_gpt_reply:
-                        extracted_date = '11/11/1111'
-                    else:
-                        extracted_date = global_gpt_reply
-                else:
-                    pass
-        
-                if extracted_data["company_name"] is None or extracted_data["email"] is None:
+        if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL" or extracted_expiry_date == "UNSURE ABOUT DATE":
+            if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
+                if followup_ticket == False:
                     comment = (
-                        "Hi, I reviewed the descriptions of this ticket and the previous one it follows up on, but I could not find all the information needed to proceed with the CloudFix cancellation. It seems that either the expiry date, company name, or email is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
-                        "Expiry Date:\n"
+                        "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems that either the company name or customer's email address is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                        "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
                         "Company Name:\n"
                         "Contact Full Name:\n"
                         "Contact Email:\n\n"
                         "Thank you!"
                     )
                     put_ticket_on_solved_pr(credentials, ticket_number, comment)
-                    status= "CF Automan did not find either the date, company name or email which are vital to complete this request. I also checked the previous linked ticket."
+                    status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request."
                     write_to_gsheet(gscredentials, current_time, ticket_number, status)
-                    #stop the script
                     return
-                else:
+                
+                else: #if followup_ticket == True:      
+                    # Check the description of the followup ticket
+                    response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
+                    if response.status_code == 200:
+                        ticket_gen_data = response.json()
+                        ticket_description_text = ticket_gen_data['ticket'].get('description', None)
+                    else:
+                        print(f"Failed to fetch sc data: {response.status_code}")   
+                    
+                    #ticketDescription using GPT
+                    extracted_data = call_gpt(filename)
+
+                    # Parse the data
+                    if extracted_data.strip():  # Ensure the string is not empty
+                        try:
+                            extracted_data_dict = parse_extracted_data(extracted_data)
+                        except Exception as e:
+                            print(f"Error parsing data: {e}")
+                            extracted_data_dict = {}
+                    else:
+                        print("Error: extracted_data is empty!")
+                        extracted_data_dict = {}
+
+                    # Extract fields
+                    extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
+                    extracted_company_name = extracted_data_dict.get("extracted_company_name", "UNSURE ABOUT COMPANY NAME")
+                    extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
+
+                    # Print extracted values for debugging
+                    print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                    print(f"Company Name in the previous Followup Ticket: {extracted_company_name}")
+                    print(f"Email in the previous Followup Ticket: {extracted_email}")
+            
+                    if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
+                        comment = (
+                            "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems crucial informarion is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                            "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                            "Company Name:\n"
+                            "Contact Full Name:\n"
+                            "Contact Email:\n\n"
+                            "Thank you!"
+                        )
+                        put_ticket_on_solved_pr(credentials, ticket_number, comment)
+                        status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request. I also checked the previous linked ticket."
+                        write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                        #stop the script
+                        return
+                    else:
+                        pass
+            
+            elif extracted_expiry_date == "UNSURE ABOUT DATE":
+                if followup_ticket == False:
                     pass
+                
+                else: #if followup_ticket == True:      
+                    # Check the description of the followup ticket
+                    response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
+                    if response.status_code == 200:
+                        ticket_gen_data = response.json()
+                        ticket_description_text = ticket_gen_data['ticket'].get('description', None)
+                    else:
+                        print(f"Failed to fetch sc data: {response.status_code}")   
+                    
+                    #ticketDescription using GPT
+                    extracted_data = call_gpt(filename)
+
+                    # Parse the data
+                    if extracted_data.strip():  # Ensure the string is not empty
+                        try:
+                            extracted_data_dict = parse_extracted_data(extracted_data)
+                        except Exception as e:
+                            print(f"Error parsing data: {e}")
+                            extracted_data_dict = {}
+                    else:
+                        print("Error: extracted_data is empty!")
+                        extracted_data_dict = {}
+
+                    # Extract fields
+                    extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
+
+                    # Print extracted values for debugging
+                    print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+            else:
+                pass
         else:
             pass
-            
-        if is_future_date(extracted_date):
+        
+        #if no date then set a past date
+        if extracted_expiry_date == "UNSURE ABOUT DATE": 
+           extracted_expiry_date = "11/11/1111"
+        else:
+            pass
+        
+        #Set folowup if extracted_expiry_date is in the future or deprovision if date is in the past    
+        if is_future_date(extracted_expiry_date):
             print("future date!")
             #add_tag_to_ticket(ticket_number, "Future Expiry Date")
 
-            followup_update = None
+            followup_date = None
             for date_format in date_formats:
+                extracted_expiry_date = str(extracted_expiry_date)
                 try:
-                    followup_update = datetime.strptime(extracted_date, date_format).strftime("%m/%d/%Y")
+                    followup_date = datetime.strptime(extracted_expiry_date, date_format).strftime("%m/%d/%Y")
                     break  # Exit the loop if a valid format is found
                 except ValueError:
                     continue  # Try the next format
 
-            if followup_update is None:
-                print(f"Date format for '{extracted_date}' is not recognized.")
-                raise ValueError(f"Date format for '{extracted_date}' is not recognized.")
+            if followup_date is None:
+                print(f"Date format for '{extracted_expiry_date}' is not recognized.")
+                raise ValueError(f"Date format for '{extracted_expiry_date}' is not recognized.")
             else:
-                print(f"Follow-up date: {followup_update}")
-                write_to_scheduler_gsheet(gscredentials, ticket_number, followup_update)
+                print(f"Follow-up date: {followup_date}")
+                write_to_scheduler_gsheet(gscredentials, ticket_number, followup_date)
                 comment = "Hi, I found a future deprovisioning date. So, I have added this deprovisioning task to the [Follow-Up Scheduler](https://docs.google.com/spreadsheets/d/1p2_qDgt8CwL3_hB5vEdKba3XC4TAbm8CL7IOS-lAeEg/edit?usp=sharing).\n\n Thank you!"
                 put_ticket_on_solved_pr(credentials, ticket_number, comment)
                 status= "CF Automan found a future deprovisioning date and added it to the Follow-Up Scheduler."
@@ -625,7 +756,7 @@ def lambda_handler(event, context):
                 return
             
         else:
-            print(f"deprovisioning {extracted_data['company_name']}")
+            print(f"deprovisioning {extracted_company_name}")
             logging.basicConfig(level=logging.ERROR)
             try:
                 with pymysql.connect(
@@ -636,12 +767,15 @@ def lambda_handler(event, context):
                     database=DB_NAME
                 ) as conn:
                     with conn.cursor() as cursor:
-                        deprovision_instance(cursor, extracted_data["company_name"])
+                        extracted_company_name = str(extracted_company_name)
+                        deprovision_instance(cursor, extracted_company_name)
                         conn.commit()
             except pymysql.MySQLError as err:
                 logging.error(f"Database Error: {err}")
+                raise Exception("Database Error")
             except Exception as err:
                 logging.error(f"An unexpected error occurred during provisioning: {err}")
+                raise Exception("An unexpected error occurred")
             return
 
     
@@ -650,45 +784,38 @@ def lambda_handler(event, context):
     ##############################################################################################
     
     except Exception as e:
+        status = "An unexpected error occurred"
+        
         if "Invalid" in str(e):
-            status= "Invalid auth or ticket number provided in the request body"
+            status = "Invalid auth or ticket number provided in the request body"
             print(f"{str(e)}")
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
-            
         
         elif "Multiple runs detected" in str(e):
-            status= "Lamda multi-run detected and stopped using DBB."
+            status = "Lamda multi-run detected and stopped using DBB."
             print(f"{str(e)}")
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
         
         elif "Database" in str(e):
             print(f"Database exception occurred on the ticket {ticket_number}: {str(e)}")
             comment = "Oops, looks like I encountered a bit of a snag while deprovisioning! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
-            ticket_status = "open"
             status = "CF Automation encountered a bit of a snag while deprovisioning"
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
             put_ticket_on_open(credentials, ticket_number, comment)
-            
+        
         elif "Google API error" in str(e):
             print(f"Google API exception occurred on the ticket {ticket_number}: {str(e)}")
             comment = "Oops, looks like I encountered a bit of a snag! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
-            ticket_status = "open"
             status = "CF Automation encountered a bit of a snag with Google API"
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
             put_ticket_on_open(credentials, ticket_number, comment)
         
         elif "Date format" in str(e):
             print(f"Date format exception occurred on the ticket {ticket_number}: {str(e)}")
             comment = "Oops, looks like I encountered a bit of a snag while processing the date! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
-            ticket_status = "open"
             status = "CF Automation encountered a bit of a snag while processing the date"
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
             put_ticket_on_open(credentials, ticket_number, comment)
-            
+        
         else:
             print(f"Lamda exception occurred on the ticket {ticket_number}: {str(e)}")
             comment = "Oops, looks like I encountered a bit of a snag! So, I am leaving the ticket open for manually completing this task by an agent. Please share feedback in the log linked here so I can understand what happened and learn from it: [CF-DeprovAutomanLog](https://docs.google.com/spreadsheets/d/1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY/edit?usp=sharing)"
-            ticket_status = "open"
             status = "CF Automation encountered a bit of a snag"
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
             put_ticket_on_open(credentials, ticket_number, comment)
+        
+        write_to_gsheet(gscredentials, current_time, ticket_number, status)
