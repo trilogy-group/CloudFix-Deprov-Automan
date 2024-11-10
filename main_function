@@ -26,7 +26,8 @@ import pymysql
 Status = ""
 
 #Authentication
-...
+-
+
 #Google Sheet Setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1r-jUET6tchc3GhWGtH2TPDczV-_jKQgF7B6mAY9VbZY'
@@ -416,7 +417,7 @@ def lambda_handler(event, context):
                 tenant_id = result[0][0]
                 cursor.execute(f"UPDATE tenants SET entitlement_tier = NULL, pricing_plan_id = 4 WHERE id = {tenant_id}")
                 result = cursor.fetchall()
-                print('updated',result)
+                #print('updated',result)
 
                 cursor.execute(f'SELECT id, company_name, entitlement_tier, pricing_plan_id FROM tenants WHERE id = {tenant_id}')
                 result = cursor.fetchall()
@@ -577,7 +578,7 @@ def lambda_handler(event, context):
             extracted_data_dict = {}
 
         # Extract fields
-        extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
+        extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "NO DATE FOUND")
         extracted_company_name = extracted_data_dict.get("extracted_company_name", "UNSURE ABOUT COMPANY NAME")
         extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
 
@@ -604,27 +605,61 @@ def lambda_handler(event, context):
         # else:
         #     pass
         
-        if extracted_expiry_date == "MULTIPLE DATES FOUND":
-            comment = (
-                "I found multiple dates in the ticket description. It is important to have a single date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
-                "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
-                "Company Name:\n"
-                "Contact Full Name:\n"
-                "Contact Email:\n\n"
-                "Thank you!"
-            )
-            put_ticket_on_solved_pr(credentials, ticket_number, comment)
-            status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
-            write_to_gsheet(gscredentials, current_time, ticket_number, status)
-            #end the script
-            return
+        # if extracted_expiry_date == "UNSURE ABOUT DATE":
+        #     comment = (
+        #         "I am unsure about the expiry date mentioned in this request. It is important to have a single, clear date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+        #         "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+        #         "Company Name:\n"
+        #         "Contact Full Name:\n"
+        #         "Contact Email:\n\n"
+        #         "Thank you!"
+        #     )
+        #     put_ticket_on_solved_pr(credentials, ticket_number, comment)
+        #     status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
+        #     write_to_gsheet(gscredentials, current_time, ticket_number, status)
+        #     #end the script
+        #     return
+        # else:
+        #     pass
             
         #check extracted data for {'company_name' and 'email'} if any is missing then open the ticket with comment that data is missing
-        if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL" or extracted_expiry_date == "UNSURE ABOUT DATE":
-            if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
-                if followup_ticket == False:
+        if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
+            if followup_ticket == True: 
+                # Check the description of the followup ticket
+                response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
+                if response.status_code == 200:
+                    ticket_gen_data = response.json()
+                    ticket_description_text = ticket_gen_data['ticket'].get('description', None)
+                else:
+                    print(f"Failed to fetch sc data: {response.status_code}")   
+                
+                #ticketDescription using GPT
+                extracted_data = call_gpt(filename)
+
+                # Parse the data
+                if extracted_data.strip():  # Ensure the string is not empty
+                    try:
+                        extracted_data_dict = parse_extracted_data(extracted_data)
+                    except Exception as e:
+                        print(f"Error parsing data: {e}")
+                        extracted_data_dict = {}
+                else:
+                    print("Error: extracted_data is empty!")
+                    extracted_data_dict = {}
+
+                # Extract fields
+                #extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "NO DATE FOUND")
+                extracted_company_name = extracted_data_dict.get("extracted_company_name", "UNSURE ABOUT COMPANY NAME")
+                extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
+
+                # Print extracted values for debugging
+                #print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                print(f"Company Name in the previous Followup Ticket: {extracted_company_name}")
+                print(f"Email in the previous Followup Ticket: {extracted_email}")
+        
+                if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
                     comment = (
-                        "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems that either the company name or customer's email address is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                        "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems crucial informarion is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
                         "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
                         "Company Name:\n"
                         "Contact Full Name:\n"
@@ -632,99 +667,82 @@ def lambda_handler(event, context):
                         "Thank you!"
                     )
                     put_ticket_on_solved_pr(credentials, ticket_number, comment)
-                    status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request."
+                    status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request. I also checked the previous linked ticket."
                     write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                    #stop the script
                     return
-                
-                else: #if followup_ticket == True:      
-                    # Check the description of the followup ticket
-                    response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
-                    if response.status_code == 200:
-                        ticket_gen_data = response.json()
-                        ticket_description_text = ticket_gen_data['ticket'].get('description', None)
-                    else:
-                        print(f"Failed to fetch sc data: {response.status_code}")   
-                    
-                    #ticketDescription using GPT
-                    extracted_data = call_gpt(filename)
-
-                    # Parse the data
-                    if extracted_data.strip():  # Ensure the string is not empty
-                        try:
-                            extracted_data_dict = parse_extracted_data(extracted_data)
-                        except Exception as e:
-                            print(f"Error parsing data: {e}")
-                            extracted_data_dict = {}
-                    else:
-                        print("Error: extracted_data is empty!")
-                        extracted_data_dict = {}
-
-                    # Extract fields
-                    extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
-                    extracted_company_name = extracted_data_dict.get("extracted_company_name", "UNSURE ABOUT COMPANY NAME")
-                    extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
-
-                    # Print extracted values for debugging
-                    print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
-                    print(f"Company Name in the previous Followup Ticket: {extracted_company_name}")
-                    print(f"Email in the previous Followup Ticket: {extracted_email}")
-            
-                    if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
-                        comment = (
-                            "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems crucial informarion is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
-                            "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
-                            "Company Name:\n"
-                            "Contact Full Name:\n"
-                            "Contact Email:\n\n"
-                            "Thank you!"
-                        )
-                        put_ticket_on_solved_pr(credentials, ticket_number, comment)
-                        status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request. I also checked the previous linked ticket."
-                        write_to_gsheet(gscredentials, current_time, ticket_number, status)
-                        #stop the script
-                        return
-                    else:
-                        pass
-            
-            elif extracted_expiry_date == "UNSURE ABOUT DATE":
-                if followup_ticket == False:
+                else:
                     pass
+            else:
+                comment = (
+                    "Hi, I could not confirm all the necessary information to proceed with the CloudFix Cancellation. It seems that either the company name or customer's email address is missing. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                    "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                    "Company Name:\n"
+                    "Contact Full Name:\n"
+                    "Contact Email:\n\n"
+                    "Thank you!"
+                )
+                put_ticket_on_solved_pr(credentials, ticket_number, comment)
+                status= "CF Automan did not find either the company name or the customer's email which are vital to complete this request."
+                write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                return
+        else:
+            pass
+        
+        if extracted_expiry_date == ("NO DATE FOUND" or "UNSURE ABOUT DATE"):
+            if followup_ticket == True:   
+                # Check the description of the followup ticket
+                response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
+                if response.status_code == 200:
+                    ticket_gen_data = response.json()
+                    ticket_description_text = ticket_gen_data['ticket'].get('description', None)
+                else:
+                    print(f"Failed to fetch sc data: {response.status_code}")   
                 
-                else: #if followup_ticket == True:      
-                    # Check the description of the followup ticket
-                    response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
-                    if response.status_code == 200:
-                        ticket_gen_data = response.json()
-                        ticket_description_text = ticket_gen_data['ticket'].get('description', None)
-                    else:
-                        print(f"Failed to fetch sc data: {response.status_code}")   
-                    
-                    #ticketDescription using GPT
-                    extracted_data = call_gpt(filename)
+                #ticketDescription using GPT
+                extracted_data = call_gpt(filename)
 
-                    # Parse the data
-                    if extracted_data.strip():  # Ensure the string is not empty
-                        try:
-                            extracted_data_dict = parse_extracted_data(extracted_data)
-                        except Exception as e:
-                            print(f"Error parsing data: {e}")
-                            extracted_data_dict = {}
-                    else:
-                        print("Error: extracted_data is empty!")
+                # Parse the data
+                if extracted_data.strip():  # Ensure the string is not empty
+                    try:
+                        extracted_data_dict = parse_extracted_data(extracted_data)
+                    except Exception as e:
+                        print(f"Error parsing data: {e}")
                         extracted_data_dict = {}
+                else:
+                    print("Error: extracted_data is empty!")
+                    extracted_data_dict = {}
 
-                    # Extract fields
-                    extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "UNSURE ABOUT DATE")
+                # Extract fields
+                extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "NO DATE FOUND")
 
-                    # Print extracted values for debugging
-                    print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                # Print extracted values for debugging
+                print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                
+                #Multiple Dates Check in Followup
+                if extracted_expiry_date == "UNSURE ABOUT DATE":
+                    comment = (
+                        "I am unsure about the expiry date mentioned in this request. It is important to have a single, clear date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                        "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                        "Company Name:\n"
+                        "Contact Full Name:\n"
+                        "Contact Email:\n\n"
+                        "Thank you!"
+                    )
+                    put_ticket_on_solved_pr(credentials, ticket_number, comment)
+                    status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
+                    write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                    #end the script
+                    return
+                else:
+                    pass
             else:
                 pass
         else:
             pass
-        
+
         #if no date then set a past date
-        if extracted_expiry_date == "UNSURE ABOUT DATE": 
+        if extracted_expiry_date == "NO DATE FOUND": 
            extracted_expiry_date = "11/11/1111"
         else:
             pass
