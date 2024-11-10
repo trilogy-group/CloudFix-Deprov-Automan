@@ -4,10 +4,16 @@
     - extracted_company_name = <This is the customer's company name>
     - extracted_email = = <This is the customer's primary email from the company name mentioned above whose subscription will be terminated. If there are multiple email addresses found, then only consider the first provided email address and list here.>
 - Be precise and thorough. This infromation will be used to deactivate the customer's subscription.
-- If there are multiple customer email addresses found, then only consider the first provided email address and ignore the rest. 
-- If the request says cancel immediately or now, return today's date for "extracted_expiry_date" in your response. 
-- If there is any ambiguity due to multiple expiry dates, respond with respond with "MULTIPLE DATES FOUND".
-- If there is any ambiguity due to multiple company names, no customer email addresses, incomplete information, or missing, respond with respond with "UNSURE ABOUT COMPANY NAME" or "UNSURE ABOUT EMAIL" as relevant for each item.
+- Follow these guidelines for returning the "extracted_expiry_date" value:
+    - If the request includes "immediately," "today," "right away," "now," or similar language implying urgency, the extracted expiry date must be the current date in the format DD/MM/YYYY.
+    - If the request says "immediately", "today", "rightaway", or "now" but also includes a specific future date, respond with "UNSURE ABOUT DATE" (to indicate ambiguity).
+    - If no dates are found and cancellation is not explicitly indicated for "immediately", "today", "rightaway", or "now", respond with "NO DATE FOUND".
+    - If multiple conflicting dates are found, or there is ambiguity about which date to use, respond with "UNSURE ABOUT DATE".
+    - Always format the extracted expiry date in the strict DD/MM/YYYY format. 
+    - ALWAYS double check the dates!!!
+- Follow these guidelines for returning the "extracted_company_name" and "extracted_email" values:
+    - If there are multiple customer email addresses found, then only consider the first provided email address and ignore the rest. 
+    - If there is any ambiguity due to multiple company names, no customer email addresses, incomplete information, or missing, respond with respond with "UNSURE ABOUT COMPANY NAME" or "UNSURE ABOUT EMAIL".
 - Here's an example of an expected reponse, where you are able to find all of the the values:
     For example, consider the below ticket description text:
         Hi Team,
@@ -28,11 +34,11 @@
         * please raise a support ticket with the subject CloudFix Deprovisioning - Company Name and the following in the body:# Hi Team,# Please process cancellation request.# Product: Cloudfix# Company Name: Precision Medicine Group# Contact Full Name: Oscar Correa# Contact Email: oscar.correa@precisionvh.com, Oscar.Correa@precisionmedicinegrp.com
 
     Your expected Response:
-        - extracted_expiry_date = "UNSURE ABOUT DATE"
+        - extracted_expiry_date = "NO DATE FOUND"
         - extracted_company_name = "Precision Medicine Group"
         - extracted_email = "oscar.correa@precisionvh.com"
 
-- Here's an example of an expected reposne, where you are NOT able to find none of the values:
+- Here's an example of an expected reposne, where you are NOT able to find the values:
     - For example, consider the below text:
         Hi Team,
         Please process cancellation request effective Aug 21.Name: Oscar Corlease raise a support ticket with the subject CloudFix Deprovisioning - Company N
@@ -47,7 +53,7 @@
         * Hi Team,# Please process cancellation now for company Precision Medicine Group,email oscar.correa@precisionvh.com, Oscar.Correa@precisionmedicinegrp.com, date 12th nov 2028
 
     Your expected Response:
-        - extracted_expiry_date = "MULTIPLE DATES FOUND"
+        - extracted_expiry_date = "UNSURE ABOUT DATE"
         - extracted_company_name = "Precision Medicine Group"
         - extracted_email = "oscar.correa@precisionvh.com"
 
@@ -55,9 +61,13 @@
 ticket_description_text
 
 ### RESPONSE GUIDELINES:
-- Only respond with the precise infromation as seen in the example below. Otherwise, respond with "UNSURE ABOUT DATE", "MULTIPLE DATES FOUND", "UNSURE ABOUT COMPANY NAME" or "UNSURE ABOUT EMAIL". 
+- Only respond with the precise infromation as seen in the example below. Otherwise, respond with "UNSURE ABOUT DATE", "NO DATE FOUND", "UNSURE ABOUT COMPANY NAME" or "UNSURE ABOUT EMAIL". 
 - DO NOT ADD any additional info. 
 - Add each item in a seperate line.
+- Example when values are not found but date is not mentioned:
+    - extracted_expiry_date = "NO DATE FOUND"
+    - extracted_company_name = "Precision Medical"
+    - extracted_email = "xyz@pecision.com"
 - Example when values are found:
     - extracted_expiry_date = "01/30/2025"
     - extracted_company_name = "Precision Medical"
