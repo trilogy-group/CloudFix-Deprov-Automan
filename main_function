@@ -72,9 +72,9 @@ def lambda_handler(event, context):
     gpt_date = ""
     ticket_description_text = ""
     extracted_expiry_date = ""
-    extracted_expiry_date_previous = ""
     extracted_company_name = ""
     extracted_email = ""
+    extracted_expiry_date_previous = None
 
     
     # Define possible date formats
@@ -592,7 +592,7 @@ def lambda_handler(event, context):
         #### MAIN LOGIC ####
         ############################################################################################################    
             
-        #check extracted data for {'company_name' and 'email'} if any is missing then open the ticket with comment that data is missing
+        #if {'company_name' and 'email'} are missing, check in the followup ticket if applicable
         if extracted_company_name == "UNSURE ABOUT COMPANY NAME" or extracted_email == "UNSURE ABOUT EMAIL":
             if followup_ticket == True: 
                 # Check the description of the followup ticket
@@ -623,7 +623,7 @@ def lambda_handler(event, context):
                 extracted_email = extracted_data_dict.get("extracted_email", "UNSURE ABOUT EMAIL")
 
                 # Print extracted values for debugging
-                #print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date_previous}")
+                #print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
                 print(f"Company Name in the previous Followup Ticket: {extracted_company_name}")
                 print(f"Email in the previous Followup Ticket: {extracted_email}")
         
@@ -659,40 +659,82 @@ def lambda_handler(event, context):
         else:
             pass
         
+        #If expiry date is not present or clear, check in the followup ticket if applicable
         if extracted_expiry_date == ("NO DATE FOUND" or "UNSURE ABOUT DATE"):
             if followup_ticket == True:   
-                extracted_expiry_date = extracted_expiry_date_previous
-
-                # Print extracted values for debugging
-                print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                if extracted_expiry_date_previous != None: #this means we had already checked the followup ticket
+                 extracted_expiry_date == extracted_expiry_date_previous
+                else: #lookinto the followup ticket
+                    # Check the description of the followup ticket
+                    response = session.get(f'https://central-supportdesk.zendesk.com/api/v2/tickets/{followup_ticket_number}.json')
+                    
+                    if response.status_code == 200:
+                        ticket_gen_data = response.json()
+                        ticket_description_text = ticket_gen_data['ticket'].get('description', None)
+                    else:
+                        print(f"Failed to fetch sc data: {response.status_code}")   
                 
-                #Multiple Dates Check in Followup
-                if extracted_expiry_date == "UNSURE ABOUT DATE":
-                    comment = (
-                        "I am unsure about the expiry date mentioned in this request. It is important to have a single, clear date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
-                        "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
-                        "Company Name:\n"
-                        "Contact Full Name:\n"
-                        "Contact Email:\n\n"
-                        "Thank you!"
-                    )
-                    put_ticket_on_solved_pr(credentials, ticket_number, comment)
-                    status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
-                    write_to_gsheet(gscredentials, current_time, ticket_number, status)
-                    #end the script
-                    return
-                else:
-                    pass
+                    #ticketDescription using GPT
+                    extracted_data = call_gpt(filename)
+
+                    # Parse the data
+                    if extracted_data.strip():  # Ensure the string is not empty
+                        try:
+                            extracted_data_dict = parse_extracted_data(extracted_data)
+                        except Exception as e:
+                            print(f"Error parsing data: {e}")
+                            extracted_data_dict = {}
+                    else:
+                        print("Error: extracted_data is empty!")
+                        extracted_data_dict = {}
+
+                    # Extract fields
+                    extracted_expiry_date = extracted_data_dict.get("extracted_expiry_date", "NO DATE FOUND")
+
+                    # Print extracted values for debugging
+                    print(f"Expiry Date in the previous Followup Ticket: {extracted_expiry_date}")
+                    
+                    #Multiple Dates Check in Followup
+                    if extracted_expiry_date == "UNSURE ABOUT DATE":
+                        comment = (
+                            "I am unsure about the expiry date mentioned in this request. It is important to have a single, clear date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                            "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                            "Company Name:\n"
+                            "Contact Full Name:\n"
+                            "Contact Email:\n\n"
+                            "Thank you!"
+                        )
+                        put_ticket_on_solved_pr(credentials, ticket_number, comment)
+                        status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
+                        write_to_gsheet(gscredentials, current_time, ticket_number, status)
+                        #end the script
+                        return
+                    else:
+                        pass
             else:
                 pass
         else:
             pass
 
-        #if no date then set a past date
-        if extracted_expiry_date == "NO DATE FOUND": 
-           extracted_expiry_date = "11/11/1111"
-        else:
+        #Confirm the Expiry Date status
+        if extracted_expiry_date != ("NO DATE FOUND" or "UNSURE ABOUT DATE"):
             pass
+        elif extracted_expiry_date == "NO DATE FOUND": 
+           extracted_expiry_date = "11/11/1111" #adding a random past date to continue the cancellation if no date found
+        else: #if extracted_expiry_date == "UNSURE ABOUT DATE" or None
+            comment = (
+                "I am unsure about the expiry date mentioned in this request. It is important to have a single, clear date to proceed with the CloudFix Cancellation. \n\nPlease create a new ticket that clearly confirms the following required information for the CloudFix cancellation to move forward:\n\n"
+                "Expiry Date: <Add if available, otherwise leave blank or provide a date in the past for automation to perform deactivation immediately>\n"
+                "Company Name:\n"
+                "Contact Full Name:\n"
+                "Contact Email:\n\n"
+                "Thank you!"
+            )
+            put_ticket_on_solved_pr(credentials, ticket_number, comment)
+            status= "CF Automan found multiple dates in the ticket description which is not clear to proceed."
+            write_to_gsheet(gscredentials, current_time, ticket_number, status)
+            #end the script
+            return
         
         #Set folowup if extracted_expiry_date is in the future or deprovision if date is in the past    
         if is_future_date(extracted_expiry_date):
